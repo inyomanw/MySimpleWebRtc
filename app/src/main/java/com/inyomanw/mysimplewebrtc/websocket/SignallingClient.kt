@@ -2,46 +2,55 @@ package com.inyomanw.mysimplewebrtc.websocket
 
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonObject
 import com.inyomanw.mysimplewebrtc.model.*
+import com.inyomanw.mysimplewebrtc.ui.CallActivity.Companion.LOGNYO
 import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONObject
 import org.webrtc.IceCandidate
 import org.webrtc.SessionDescription
 import java.net.URI
 
-class SignallingClient(private val userId: Int, private val callback: SignallingCallback) {
+class SignallingClient {
+    companion object {
+        val instance by lazy {
+            SignallingClient()
+        }
+    }
 
     interface SignallingCallback {
         fun onPeers(peers: MutableList<PeerData>)
         fun onOffer(data: MessageData)
+    }
+
+    interface IceCandidateCallback {
         fun onCandidateReceived(candidate: MessageIncomingCandidate?)
         fun onAnswer(data: MessageData)
         fun onHangup()
-        fun onOpen(userId: String)
     }
 
-    private var socket: AppWebSocket
+    var iceCandidateCallback: IceCandidateCallback? = null
+    val iceCandidates: MutableList<MessageIncomingCandidate> = mutableListOf()
+    private lateinit var socket: AppWebSocket
+    var userId: String = ""
 
-
-    init {
-        //wss://rtc.tutore.id:5553
-        //wss://semut.baggrek.com:4443
+    fun init(callback: SignallingCallback) {
+        userId = (100000..999999).random().toString()
         socket = AppWebSocket(URI("wss://semut.baggrek.com:4443"), object : AppWebSocket.AppWebSocketCallback {
             override fun onOpen(handshakedata: ServerHandshake?) {
-                Log.d("lognyo", "Signalling Client $userId")
-                createRoom(userId.toString())
-                callback.onOpen(userId.toString())
+                Log.d(LOGNYO, "onOpen SignalingClient")
+                createRoom()
             }
 
             override fun onClose(code: Int, reason: String?, remote: Boolean) {
-                Log.d("lognyo","onClose SignalingClient code : $code ; reason : $reason")
+                Log.d(LOGNYO,"onClose SignalingClient code : $code ; reason : $reason")
             }
 
             override fun onMessage(message: String?) {
-                Log.d("lognyo","onMessage SignallingClient message : $message")
+                Log.d(LOGNYO, "onMessage SignalingClient : $message")
                 val gson = Gson()
                 val messageType = gson.fromJson<MessageType>(message, MessageType::class.java)
-                Log.d("lognyo", messageType.type)
+                Log.d(LOGNYO, "onMessage SignalingClient : ${messageType.type}")
                 when (messageType.type) {
                     "peers" -> {
                         val peers = gson.fromJson<Peer>(message, Peer::class.java)
@@ -54,20 +63,24 @@ class SignallingClient(private val userId: Int, private val callback: Signalling
                     "candidate" -> {
                         val candidate =
                             gson.fromJson<MessageIncomingCandidate>(message, MessageIncomingCandidate::class.java)
-                        callback.onCandidateReceived(candidate)
+                        if(iceCandidateCallback != null){
+                            iceCandidateCallback?.onCandidateReceived(candidate)
+                        } else {
+                            iceCandidates.add(candidate)
+                        }
                     }
                     "answer" -> {
                         val signalMessage = gson.fromJson<MessageOffer>(message, MessageOffer::class.java)
-                        callback.onAnswer(signalMessage.data)
+                        iceCandidateCallback?.onAnswer(signalMessage.data)
                     }
                     "bye" -> {
-                        callback.onHangup()
+                        iceCandidateCallback?.onHangup()
                     }
                 }
             }
 
             override fun onError(ex: Exception?) {
-                Log.d("lognyo","Signalling Clinet message : ${ex?.localizedMessage}")
+                Log.d(LOGNYO, "onError : ${ex?.localizedMessage}")
                 ex?.printStackTrace()
             }
 
@@ -75,56 +88,65 @@ class SignallingClient(private val userId: Int, private val callback: Signalling
         socket.connect()
     }
 
-    fun createRoom(userId: String) {
-        val obj = Room("new", "Android/P", "MobileApp [$userId]", userId)
-        sendMessage(obj)
+    private fun createRoom() {
+        val gson = Gson()
+        val obj = Room("new", "Android/P", "MobileApp [$userId]", userId.toString())
+        val jsonObject = JSONObject(gson.toJson(obj))
+        socket.send(jsonObject.toString())
     }
 
-    fun sendIceCandidate(iceCandidate: IceCandidate, to: String?, sessionId: String?) {
-        if (to == null || sessionId == null) {
-            return
-        }
+    fun sendIceCandidate(iceCandidate: IceCandidate, from: Int, sessionId: String) {
+        val obj = JsonObject()
+        val ice = JsonObject()
 
-        val candidate = Candidate(iceCandidate.sdp, iceCandidate.sdpMLineIndex, iceCandidate.sdpMid)
-        val message = MessageSendIceCandidate("candidate", to, sessionId, candidate)
-        sendMessage(message)
-    }
+        ice.addProperty("sdpMLineIndex", iceCandidate.sdpMLineIndex)
+        ice.addProperty("sdpMid", iceCandidate.sdpMid)
+        ice.addProperty("candidate", iceCandidate.sdp)
 
-    fun ping() {
-        if (socket.isOpen) {
-            sendMessage(MessageType("keepalive"))
-        }
+        obj.addProperty("type", "candidate")
+        obj.addProperty("to", from)
+        obj.addProperty("session_id", sessionId)
+        obj.add("candidate", ice)
+
+        Log.d(LOGNYO,"SignalingClient sendIceCandidate obj : $obj")
+        socket.send(obj.toString())
     }
 
     fun sendOffer(messageOffer: MessageInvite) {
-        sendMessage(messageOffer)
+        val gson = Gson()
+        socket.send(gson.toJson(messageOffer))
     }
 
-    fun close(sessionId: String?) {
-        if (sessionId == null) {
-            return
-        }
-
-        val message = MessageBye("bye", sessionId, userId.toString())
-        sendMessage(message)
-    }
-
-    fun sendAnswer(to: String, sessionId: String, sessionDescription: SessionDescription) {
-        val description = DataDescription("answer", sessionDescription.description)
-        val message = MessageAnswer("answer", sessionDescription.description, to, sessionId, description)
-        sendMessage(message)
-    }
-
-    fun destroy() {
+    fun close(to: String, sessionId: String) {
+        val obj = JsonObject()
+        obj.addProperty("type", "bye")
+        obj.addProperty("session_id", sessionId)
+        obj.addProperty("from", userId)
+        Log.d(LOGNYO,"SignalingClient close obj : $obj")
+        socket.send(obj.toString())
         socket.close()
     }
 
-    private fun sendMessage(message: Any) {
-        if (!socket.isOpen) {
-            return
+    fun sendAnswer(to: String, sessionId: String, sessionDescription: SessionDescription) {
+        Log.d(LOGNYO,"SignalingClient sendAnswer to: $to ; sessionId: $sessionId")
+        val obj = JsonObject()
+        val desc = JsonObject()
+        desc.addProperty("sdp", sessionDescription.description)
+        desc.addProperty("type","answer")
+
+        obj.addProperty("type","answer")
+        obj.addProperty("sdp", sessionDescription.description )
+        obj.add("description", desc)
+        obj.addProperty("to", to)
+        obj.addProperty("session_id", sessionId)
+        Log.d(LOGNYO,"SignalingClient sendAnswer obj : $obj")
+
+        socket.send(obj.toString())
+    }
+
+    fun onDestroy() {
+        if (::socket.isInitialized) {
+            socket.close()
         }
-        val gson = Gson()
-        val jsonObject = JSONObject(gson.toJson(message))
-        socket.send(jsonObject.toString())
     }
 }

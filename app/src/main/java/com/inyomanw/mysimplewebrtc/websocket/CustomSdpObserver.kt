@@ -1,7 +1,7 @@
 package com.inyomanw.mysimplewebrtc.websocket
 
 import android.util.Log
-import com.inyomanw.mysimplewebrtc.ui.MainActivity.Companion.LOGNYO
+import com.inyomanw.mysimplewebrtc.ui.CallActivity.Companion.LOGNYO
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 
